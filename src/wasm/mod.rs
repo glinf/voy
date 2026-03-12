@@ -1,4 +1,6 @@
 mod fns;
+#[cfg(test)]
+mod tests;
 mod types;
 mod voy;
 

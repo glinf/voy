@@ -1,24 +1,21 @@
 {
-  "name": "voy-search",
-  "version": "0.1.0",
-  "description": "a vector similarity search engine in WASM",
+  "name": "voy-browser-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser demo for Voy v1",
   "main": "index.js",
-  "bin": {
-    "create-wasm-app": ".bin/create-wasm-app.js"
-  },
   "scripts": {
-    "build": "webpack --config webpack.config.js",
-    "dev": "webpack serve"
+    "build": "webpack --mode production --config webpack.config.js",
+    "dev": "webpack serve --mode development --config webpack.config.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rustwasm/create-wasm-app.git"
+    "url": "git+https://github.com/tantaraio/voy.git"
   },
   "keywords": [
     "webassembly",
     "wasm",
     "rust",
-    "kd-tree",
     "embeddings",
     "vector search",
     "similarity search",
@@ -31,15 +28,12 @@
   },
   "homepage": "https://github.com/tantaraio/voy#readme",
   "dependencies": {
-    "@visheratin/web-ai": "^0.4.9",
-    "jimp": "^0.22.7",
     "voy-search": "file:../../pkg"
   },
   "devDependencies": {
-    "copy-webpack-plugin": "^5.0.0",
-    "hello-wasm-pack": "^0.1.0",
-    "webpack": "^5.75.0",
-    "webpack-cli": "^5.0.1",
-    "webpack-dev-server": "^4.11.1"
+    "copy-webpack-plugin": "^12.0.2",
+    "webpack": "^5.99.9",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.2"
   }
 }

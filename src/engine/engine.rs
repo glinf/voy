@@ -1,134 +1,476 @@
 use crate::Resource;
-use kiddo::float::{distance::squared_euclidean, kdtree::KdTree};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, convert::TryInto};
+use anyhow::{Context, bail, ensure};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
-use super::hash;
+const FORMAT_MAGIC: &[u8; 4] = b"VOY1";
+const METRIC_EUCLIDEAN: u8 = 0;
+const METRIC_COSINE: u8 = 1;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Document {
     pub id: String,
     pub title: String,
     pub url: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum Query {
-    // TODO: support query in string
-    // Phrase(String)
-    Embeddings(Vec<f32>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Metric {
+    Euclidean,
+    Cosine,
 }
 
-// Wasm has a 4GB memory limit. Should make sure the bucket size and capacity
-// doesn't exceed it and cause stack overflow.
-// More detail: https://v8.dev/blog/4gb-wasm-memory
-const BUCKET_SIZE: usize = 32;
-
-pub type Tree = KdTree<f32, u64, 768, BUCKET_SIZE, u16>;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Index {
-    // "IDX" is set to u16 to optimize CPU cache.
-    // Read more: https://github.com/sdd/kiddo/blob/7a0bb6ecce39963b27ffdca913c6be7a265e3523/src/types.rs#L35
-    pub tree: Tree,
-    pub data: HashMap<u64, Document>,
+impl Default for Metric {
+    fn default() -> Self {
+        Self::Euclidean
+    }
 }
 
-pub fn index(resource: Resource) -> anyhow::Result<Index> {
-    let data_vec: Vec<(u64, Document)> = resource
-        .embeddings
-        .iter()
-        .map(|resource| Document {
-            id: resource.id.to_owned(),
-            title: resource.title.to_owned(),
-            url: resource.url.to_owned(),
-        })
-        .map(|document| (hash(&document), document))
-        .collect();
-
-    let data: HashMap<u64, Document> = data_vec.clone().into_iter().collect();
-
-    let mut tree: Tree = KdTree::new();
-
-    resource
-        .embeddings
-        .iter()
-        .zip(data_vec.iter())
-        .for_each(|(resource, data)| {
-            let mut embeddings = resource.embeddings.clone();
-            embeddings.resize(768, 0.0);
-
-            let query: &[f32; 768] = &embeddings.try_into().unwrap();
-            // "item" holds the position of the document in "data"
-            tree.add(query, data.0);
-        });
-
-    Ok(Index { tree, data })
-}
-
-pub fn search<'a>(index: &'a Index, query: &'a Query, k: usize) -> anyhow::Result<Vec<Document>> {
-    let mut query: Vec<f32> = match query {
-        Query::Embeddings(q) => q.to_owned(),
-    };
-    query.resize(768, 0.0);
-
-    let query: &[f32; 768] = &query.try_into().unwrap();
-    let neighbors = index.tree.nearest_n(query, k, &squared_euclidean);
-
-    let mut result: Vec<Document> = vec![];
-
-    for neighbor in &neighbors {
-        let doc = index.data.get(&neighbor.item);
-        if let Some(document) = doc {
-            result.push(document.to_owned());
+impl Metric {
+    fn as_byte(self) -> u8 {
+        match self {
+            Self::Euclidean => METRIC_EUCLIDEAN,
+            Self::Cosine => METRIC_COSINE,
         }
     }
 
-    Ok(result)
-}
-
-pub fn add<'a>(index: &'a mut Index, resource: &'a Resource) {
-    for item in &resource.embeddings {
-        let mut embeddings = item.embeddings.clone();
-        embeddings.resize(768, 0.0);
-
-        let query: &[f32; 768] = &embeddings.try_into().unwrap();
-        let doc = Document {
-            id: item.id.to_owned(),
-            title: item.title.to_owned(),
-            url: item.url.to_owned(),
-        };
-        let id = hash(&doc);
-        index.data.insert(id, doc);
-        index.tree.add(query, id);
+    fn from_byte(value: u8) -> anyhow::Result<Self> {
+        match value {
+            METRIC_EUCLIDEAN => Ok(Self::Euclidean),
+            METRIC_COSINE => Ok(Self::Cosine),
+            _ => bail!("unsupported metric byte: {value}"),
+        }
     }
 }
 
-pub fn remove<'a>(index: &'a mut Index, resource: &'a Resource) {
-    for item in &resource.embeddings {
-        let mut embeddings = item.embeddings.clone();
-        embeddings.resize(768, 0.0);
+#[derive(Debug, Clone)]
+pub struct Index {
+    pub dimension: Option<usize>,
+    pub metric: Metric,
+    pub documents: Vec<Document>,
+    pub vectors: Vec<f32>,
+}
 
-        let query: &[f32; 768] = &embeddings.try_into().unwrap();
-        let id = hash(&Document {
-            id: item.id.to_owned(),
-            title: item.title.to_owned(),
-            url: item.url.to_owned(),
+impl Index {
+    pub fn new(metric: Metric) -> Self {
+        Self {
+            dimension: None,
+            metric,
+            documents: Vec::new(),
+            vectors: Vec::new(),
+        }
+    }
+
+    fn dimension(&self) -> anyhow::Result<usize> {
+        self.dimension.context("index dimension is not set")
+    }
+
+    fn vector_at(&self, offset: usize) -> &[f32] {
+        let dimension = self.dimension.expect("vector_at requires a dimension");
+        let start = offset * dimension;
+        let end = start + dimension;
+        &self.vectors[start..end]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RankedHit {
+    rank_score: f32,
+    index: usize,
+}
+
+impl Eq for RankedHit {}
+
+impl Ord for RankedHit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank_score
+            .partial_cmp(&other.rank_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| self.index.cmp(&other.index))
+    }
+}
+
+impl PartialOrd for RankedHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub fn index(resource: Resource, metric: Metric) -> anyhow::Result<Index> {
+    let mut index = Index::new(metric);
+    add(&mut index, &resource)?;
+    Ok(index)
+}
+
+pub fn search(index: &Index, query: &[f32], k: usize) -> anyhow::Result<Vec<Document>> {
+    if k == 0 || index.documents.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut query = prepare_query(query, index.metric, index.dimension()?)?;
+    if index.metric == Metric::Cosine {
+        normalize(&mut query)?;
+    }
+
+    let mut heap: BinaryHeap<RankedHit> = BinaryHeap::new();
+    for offset in 0..index.documents.len() {
+        let candidate = index.vector_at(offset);
+        let score = match index.metric {
+            Metric::Euclidean => squared_euclidean(&query, candidate),
+            Metric::Cosine => dot_product(&query, candidate),
+        };
+        let rank_score = match index.metric {
+            Metric::Euclidean => score,
+            Metric::Cosine => -score,
+        };
+        let hit = RankedHit {
+            rank_score,
+            index: offset,
+        };
+
+        if heap.len() < k {
+            heap.push(hit);
+            continue;
+        }
+
+        let should_replace = heap.peek().map(|worst| hit < *worst).unwrap_or(false);
+        if should_replace {
+            heap.pop();
+            heap.push(hit);
+        }
+    }
+
+    let mut hits = heap.into_vec();
+    hits.sort_by(|left, right| {
+        left.rank_score
+            .total_cmp(&right.rank_score)
+            .then(left.index.cmp(&right.index))
+    });
+
+    Ok(hits
+        .into_iter()
+        .map(|hit| index.documents[hit.index].clone())
+        .collect())
+}
+
+pub fn add(index: &mut Index, resource: &Resource) -> anyhow::Result<()> {
+    let dimension = resolve_dimension(index.dimension, resource)?;
+    if dimension == 0 {
+        return Ok(());
+    }
+
+    index.dimension = Some(dimension);
+
+    for item in &resource.embeddings {
+        let document = Document {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            url: item.url.clone(),
+        };
+        let vector = prepare_vector(&item.embeddings, index.metric, dimension)?;
+
+        index.documents.push(document);
+        index.vectors.extend_from_slice(&vector);
+    }
+
+    Ok(())
+}
+
+pub fn remove(index: &mut Index, resource: &Resource) -> anyhow::Result<()> {
+    let Some(dimension) = index.dimension else {
+        return Ok(());
+    };
+
+    for item in &resource.embeddings {
+        if item.embeddings.len() != dimension {
+            continue;
+        }
+
+        let vector = prepare_vector(&item.embeddings, index.metric, dimension)?;
+        let candidate = Document {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            url: item.url.clone(),
+        };
+
+        if let Some(position) = index
+            .documents
+            .iter()
+            .zip(index.vectors.chunks_exact(dimension))
+            .position(|(document, stored_vector)| {
+                document == &candidate && stored_vector == vector.as_slice()
+            })
+        {
+            index.documents.remove(position);
+            let start = position * dimension;
+            let end = start + dimension;
+            index.vectors.drain(start..end);
+        }
+    }
+
+    if index.documents.is_empty() {
+        index.dimension = None;
+        index.vectors.clear();
+    }
+
+    Ok(())
+}
+
+pub fn clear(index: &mut Index) {
+    index.dimension = None;
+    index.documents.clear();
+    index.vectors.clear();
+}
+
+pub fn size(index: &Index) -> usize {
+    index.documents.len()
+}
+
+pub fn serialize(index: &Index) -> anyhow::Result<Vec<u8>> {
+    let dimension = index.dimension.unwrap_or_default();
+    ensure!(
+        u16::try_from(dimension).is_ok(),
+        "dimension exceeds u16 storage"
+    );
+    ensure!(
+        u32::try_from(index.documents.len()).is_ok(),
+        "document count exceeds u32 storage"
+    );
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(FORMAT_MAGIC);
+    bytes.push(index.metric.as_byte());
+    bytes.extend_from_slice(&(dimension as u16).to_le_bytes());
+    bytes.extend_from_slice(&(index.documents.len() as u32).to_le_bytes());
+
+    for document in &index.documents {
+        write_string(&mut bytes, &document.id)?;
+        write_string(&mut bytes, &document.title)?;
+        write_string(&mut bytes, &document.url)?;
+    }
+
+    for value in &index.vectors {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    Ok(bytes)
+}
+
+pub fn deserialize(bytes: &[u8]) -> anyhow::Result<Index> {
+    ensure!(bytes.len() >= 11, "serialized index is too short");
+    ensure!(
+        &bytes[..4] == FORMAT_MAGIC,
+        "invalid serialized index header"
+    );
+
+    let metric = Metric::from_byte(bytes[4])?;
+    let mut cursor = 5;
+    let dimension = read_u16(bytes, &mut cursor)? as usize;
+    let count = read_u32(bytes, &mut cursor)? as usize;
+
+    let mut documents = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = read_string(bytes, &mut cursor)?;
+        let title = read_string(bytes, &mut cursor)?;
+        let url = read_string(bytes, &mut cursor)?;
+        documents.push(Document { id, title, url });
+    }
+
+    let expected_vector_bytes = count
+        .checked_mul(dimension)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .context("serialized index is too large")?;
+    ensure!(
+        bytes.len().saturating_sub(cursor) == expected_vector_bytes,
+        "serialized index vector payload size is invalid"
+    );
+
+    let mut vectors = Vec::with_capacity(count.saturating_mul(dimension));
+    while cursor < bytes.len() {
+        let slice = bytes
+            .get(cursor..cursor + 4)
+            .context("serialized index ended unexpectedly while reading vector payload")?;
+        let value = f32::from_le_bytes(slice.try_into().unwrap());
+        ensure!(
+            value.is_finite(),
+            "serialized vector payload contains non-finite values"
+        );
+        vectors.push(value);
+        cursor += 4;
+    }
+
+    Ok(Index {
+        dimension: (dimension != 0).then_some(dimension),
+        metric,
+        documents,
+        vectors,
+    })
+}
+
+fn resolve_dimension(
+    current_dimension: Option<usize>,
+    resource: &Resource,
+) -> anyhow::Result<usize> {
+    if let Some(dimension) = current_dimension {
+        if resource
+            .embeddings
+            .iter()
+            .any(|item| item.embeddings.len() != dimension)
+        {
+            bail!("all embeddings must match the index dimension of {dimension}");
+        }
+        return Ok(dimension);
+    }
+
+    let mut items = resource.embeddings.iter();
+    let Some(first) = items.next() else {
+        return Ok(0);
+    };
+    let dimension = first.embeddings.len();
+    ensure!(dimension > 0, "embeddings must not be empty");
+    for item in items {
+        ensure!(
+            item.embeddings.len() == dimension,
+            "all embeddings must have the same dimension"
+        );
+    }
+    Ok(dimension)
+}
+
+fn prepare_query(query: &[f32], metric: Metric, dimension: usize) -> anyhow::Result<Vec<f32>> {
+    prepare_vector(query, metric, dimension)
+}
+
+fn prepare_vector(
+    embeddings: &[f32],
+    metric: Metric,
+    dimension: usize,
+) -> anyhow::Result<Vec<f32>> {
+    ensure!(dimension > 0, "embeddings must not be empty");
+    ensure!(
+        embeddings.len() == dimension,
+        "expected {dimension}-dimensional embeddings but received {}",
+        embeddings.len()
+    );
+    ensure!(
+        embeddings.iter().all(|value| value.is_finite()),
+        "embeddings must contain only finite values"
+    );
+
+    let mut vector = embeddings.to_vec();
+    if metric == Metric::Cosine {
+        normalize(&mut vector)?;
+    }
+    Ok(vector)
+}
+
+fn normalize(vector: &mut [f32]) -> anyhow::Result<()> {
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    ensure!(
+        norm.is_finite() && norm > 0.0,
+        "embeddings must have a non-zero norm"
+    );
+    for value in vector {
+        *value /= norm;
+    }
+    Ok(())
+}
+
+fn squared_euclidean(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right.iter())
+        .map(|(left, right)| {
+            let difference = left - right;
+            difference * difference
+        })
+        .sum()
+}
+
+fn dot_product(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right.iter())
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
+fn write_string(bytes: &mut Vec<u8>, value: &str) -> anyhow::Result<()> {
+    ensure!(
+        u32::try_from(value.len()).is_ok(),
+        "string value exceeds u32 storage"
+    );
+    bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn read_u16(bytes: &[u8], cursor: &mut usize) -> anyhow::Result<u16> {
+    let slice = bytes
+        .get(*cursor..*cursor + 2)
+        .context("serialized index ended unexpectedly while reading u16")?;
+    *cursor += 2;
+    Ok(u16::from_le_bytes(slice.try_into().unwrap()))
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> anyhow::Result<u32> {
+    let slice = bytes
+        .get(*cursor..*cursor + 4)
+        .context("serialized index ended unexpectedly while reading u32")?;
+    *cursor += 4;
+    Ok(u32::from_le_bytes(slice.try_into().unwrap()))
+}
+
+fn read_string(bytes: &[u8], cursor: &mut usize) -> anyhow::Result<String> {
+    let length = read_u32(bytes, cursor)? as usize;
+    let slice = bytes
+        .get(*cursor..*cursor + length)
+        .context("serialized index ended unexpectedly while reading string payload")?;
+    *cursor += length;
+    String::from_utf8(slice.to_vec()).context("serialized index contains invalid UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranked_hits_sort_best_first() {
+        let mut hits = vec![
+            RankedHit {
+                rank_score: 4.0,
+                index: 4,
+            },
+            RankedHit {
+                rank_score: 1.0,
+                index: 2,
+            },
+            RankedHit {
+                rank_score: 1.0,
+                index: 1,
+            },
+        ];
+
+        hits.sort_by(|left, right| {
+            left.rank_score
+                .total_cmp(&right.rank_score)
+                .then(left.index.cmp(&right.index))
         });
 
-        index.tree.remove(query, id);
-        index.data.remove(&id);
+        assert_eq!(
+            hits,
+            vec![
+                RankedHit {
+                    rank_score: 1.0,
+                    index: 1,
+                },
+                RankedHit {
+                    rank_score: 1.0,
+                    index: 2,
+                },
+                RankedHit {
+                    rank_score: 4.0,
+                    index: 4,
+                },
+            ]
+        );
     }
-}
-
-pub fn clear<'a>(index: &'a mut Index) {
-    // simply assign a new tree and data because traversing the nodes to perform removal is the only alternative.
-    // Kiddo provides only basic removal. See more: https://github.com/sdd/kiddo/issues/76
-    index.tree = KdTree::new();
-    index.data = HashMap::new();
-}
-
-pub fn size<'a>(index: &'a Index) -> usize {
-    index.data.len()
 }

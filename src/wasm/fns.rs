@@ -1,75 +1,88 @@
 use crate::{
-    engine, utils::set_panic_hook, Neighbor, NumberOfResult, Query, Resource, SearchResult,
-    SerializedIndex,
+    Neighbor, NumberOfResult, Query, Resource, SearchResult, SerializedIndex, VoyOptions, engine,
+    utils::set_panic_hook,
 };
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-pub fn index(resource: Resource) -> SerializedIndex {
+pub fn index(resource: Resource, options: Option<VoyOptions>) -> Result<SerializedIndex, JsError> {
     set_panic_hook();
 
-    let index = engine::index(resource);
-    match index {
-        Ok(idx) => serde_json::to_string(&idx).unwrap(),
-        _ => "".to_owned(),
-    }
+    let metric = options
+        .unwrap_or_default()
+        .metric()
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    let index =
+        engine::index(resource, metric).map_err(|error| JsError::new(&error.to_string()))?;
+    engine::serialize(&index).map_err(|error| JsError::new(&error.to_string()))
 }
 
 #[wasm_bindgen]
-pub fn search(index: SerializedIndex, query: Query, k: NumberOfResult) -> SearchResult {
+pub fn search(
+    serialized_index: SerializedIndex,
+    query: Query,
+    k: NumberOfResult,
+) -> Result<SearchResult, JsError> {
     set_panic_hook();
 
-    let index: engine::Index = serde_json::from_str(&index).unwrap();
-    let query: engine::Query = engine::Query::Embeddings(query);
+    let index =
+        engine::deserialize(&serialized_index).map_err(|error| JsError::new(&error.to_string()))?;
+    let neighbors =
+        engine::search(&index, &query, k).map_err(|error| JsError::new(&error.to_string()))?;
 
-    let neighbors = engine::search(&index, &query, k).unwrap();
-    let neighbors: Vec<Neighbor> = neighbors
-        .into_iter()
-        .map(|x| Neighbor {
-            id: x.id,
-            title: x.title,
-            url: x.url,
-        })
-        .collect();
-
-    SearchResult { neighbors }
+    Ok(SearchResult {
+        neighbors: neighbors
+            .into_iter()
+            .map(|document| Neighbor {
+                id: document.id,
+                title: document.title,
+                url: document.url,
+            })
+            .collect(),
+    })
 }
 
 #[wasm_bindgen]
-pub fn add(index: SerializedIndex, resource: Resource) -> SerializedIndex {
+pub fn add(
+    serialized_index: SerializedIndex,
+    resource: Resource,
+) -> Result<SerializedIndex, JsError> {
     set_panic_hook();
 
-    let mut index: engine::Index = serde_json::from_str(&index).unwrap();
-    engine::add(&mut index, &resource);
-
-    serde_json::to_string(&index).unwrap()
+    let mut index =
+        engine::deserialize(&serialized_index).map_err(|error| JsError::new(&error.to_string()))?;
+    engine::add(&mut index, &resource).map_err(|error| JsError::new(&error.to_string()))?;
+    engine::serialize(&index).map_err(|error| JsError::new(&error.to_string()))
 }
 
 #[wasm_bindgen]
-pub fn remove(index: SerializedIndex, resource: Resource) -> SerializedIndex {
+pub fn remove(
+    serialized_index: SerializedIndex,
+    resource: Resource,
+) -> Result<SerializedIndex, JsError> {
     set_panic_hook();
 
-    let mut index: engine::Index = serde_json::from_str(&index).unwrap();
-    engine::remove(&mut index, &resource);
-
-    serde_json::to_string(&index).unwrap()
+    let mut index =
+        engine::deserialize(&serialized_index).map_err(|error| JsError::new(&error.to_string()))?;
+    engine::remove(&mut index, &resource).map_err(|error| JsError::new(&error.to_string()))?;
+    engine::serialize(&index).map_err(|error| JsError::new(&error.to_string()))
 }
 
 #[wasm_bindgen]
-pub fn clear(index: SerializedIndex) -> SerializedIndex {
+pub fn clear(serialized_index: SerializedIndex) -> Result<SerializedIndex, JsError> {
     set_panic_hook();
 
-    let mut index: engine::Index = serde_json::from_str(&index).unwrap();
+    let mut index =
+        engine::deserialize(&serialized_index).map_err(|error| JsError::new(&error.to_string()))?;
     engine::clear(&mut index);
-
-    serde_json::to_string(&index).unwrap()
+    engine::serialize(&index).map_err(|error| JsError::new(&error.to_string()))
 }
 
 #[wasm_bindgen]
-pub fn size(index: SerializedIndex) -> usize {
+pub fn size(serialized_index: SerializedIndex) -> Result<usize, JsError> {
     set_panic_hook();
 
-    let index: engine::Index = serde_json::from_str(&index).unwrap();
-
-    engine::size(&index)
+    let index =
+        engine::deserialize(&serialized_index).map_err(|error| JsError::new(&error.to_string()))?;
+    Ok(engine::size(&index))
 }

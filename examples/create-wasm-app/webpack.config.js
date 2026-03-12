@@ -2,16 +2,20 @@ const CopyWebpackPlugin = require("copy-webpack-plugin");
 const path = require("path");
 
 module.exports = {
-  mode: "development",
   entry: "./bootstrap.js",
   output: {
     path: path.resolve(__dirname, "dist"),
     filename: "bootstrap.js",
+    clean: true,
+    publicPath: "",
   },
-  plugins: [new CopyWebpackPlugin(["index.html"])],
+  plugins: [
+    new CopyWebpackPlugin({
+      patterns: ["index.html", "embed-worker.js"],
+    }),
+  ],
   experiments: {
     asyncWebAssembly: true,
-    syncWebAssembly: true,
   },
   devServer: {
     static: {

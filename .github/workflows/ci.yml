@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  rust-and-demo:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+
+      - uses: browser-actions/setup-firefox@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: examples/create-wasm-app/package-lock.json
+
+      - name: Run native tests
+        run: cargo test
+
+      - name: Build wasm package
+        run: wasm-pack build --target web --out-dir pkg
+
+      - name: Run browser wasm tests
+        run: wasm-pack test --headless --firefox
+
+      - name: Install demo dependencies
+        working-directory: examples/create-wasm-app
+        run: npm ci
+
+      - name: Build demo
+        working-directory: examples/create-wasm-app
+        run: npm run build

@@ -1,164 +1,335 @@
-import { TextModel } from "@visheratin/web-ai";
-import { logIndex, logIntro, logResource } from "./log";
-import { phrases } from "./phrases";
-import { perf } from "./performance";
+const SAMPLE_DOCUMENTS = [
+  {
+    title: "Amazon rainforest overview",
+    text: "The Amazon rainforest is a moist broadleaf tropical rainforest in South America and the largest rainforest on Earth.",
+  },
+  {
+    title: "Peru and Colombia",
+    text: "The Amazon basin spans multiple countries. Brazil contains most of the forest, while Peru and Colombia also cover large areas.",
+  },
+  {
+    title: "Indigenous territories",
+    text: "The Amazon includes thousands of formally acknowledged indigenous territories with distinct communities and histories.",
+  },
+];
 
-const initialQuery =
-  "Which name is also used to describe the Amazon rainforest in English?";
+let voy;
+let entries = [];
+let worker;
+let currentSearchToken = 0;
+let currentAddToken = 0;
 
-const initialPhrases = phrases.slice(0, 6);
-
-const main = async () => {
-  const timer = perf();
-
-  logIntro("🎉 Welcome to Voy");
-  logIntro("🕸️ Loading Voy ...");
-
-  // Loading voy WebAssembly module asynchronously
-  const { Voy } = await import("voy-search");
-
-  logIntro(`🕸️ Voy is loaded ✔️ ...`);
-  logIntro("🕸️ Voy is indexing [");
-
-  logResource([...initialPhrases.map((p) => `・ "${p}",`)]);
-
-  logIndex(`・ ] (${initialPhrases.length} phrases) ...`);
-
-  // Create text embeddings
-  const model = await (await TextModel.create("gtr-t5-quant")).model;
-  const processed = await Promise.all(
-    initialPhrases.map((q) => model.process(q))
-  );
-
-  // Index embeddings with voy
-  const data = processed.map(({ result }, i) => ({
-    id: String(i),
-    title: initialPhrases[i],
-    url: `/path/${i}`,
-    embeddings: result,
-  }));
-  const resource = { embeddings: data };
-
-  const voy = new Voy(resource);
-
-  logIndex(`🕸️ Voy is indexed ✔️ ...`);
-  logIndex(
-    `🕸️ Voy is searching for the nearest neighbors of "${initialQuery}" ...`
-  );
-
-  // Perform similarity search for the query embeddings
-  const q = await model.process(initialQuery);
-  const result = voy.search(q.result, 3);
-
-  // Display search result
-  logIndex("🕸️ --- Voy similarity search result ---");
-
-  result.neighbors.forEach((result, i) => {
-    if (i === 0) {
-      logIndex(`🥇  "${result.title}"`);
-    } else if (i === 1) {
-      logIndex(`🥈  "${result.title}"`);
-    } else if (i === 2) {
-      logIndex(`🥉  "${result.title}"`);
-    } else {
-      logIndex(`🕸️  "${result.title}"`);
-    }
-  });
-
-  logIndex("⮐");
-
-  const newPhrase = phrases.slice(6, 7);
-
-  logIndex(`🕸️ Voy is adding a new phrase "${newPhrase[0]}" to the index ...`);
-
-  const newEmbeddings = await Promise.all(
-    newPhrase.map((q) => model.process(q))
-  );
-
-  const addition = newEmbeddings.map(({ result }, i) => ({
-    id: String(6),
-    title: newPhrase[i],
-    url: `/path/${6}`,
-    embeddings: result,
-  }));
-
-  index = voy.add({ embeddings: addition });
-
-  logIndex(`🕸️ Voy is indexed ✔️ ...`);
-  logIndex(
-    `🕸️ Voy is searching for the nearest neighbors of "${initialQuery}" ...`
-  );
-  logIndex("🕸️ --- Voy similarity search result ---");
-
-  voy.search(q.result, 3).neighbors.forEach((result, i) => {
-    if (i === 0) {
-      logIndex(`🥇  "${result.title}"`);
-    } else if (i === 1) {
-      logIndex(`🥈  "${result.title}"`);
-    } else if (i === 2) {
-      logIndex(`🥉  "${result.title}"`);
-    } else {
-      logIndex(`🕸️  "${result.title}"`);
-    }
-  });
-
-  logIndex("⮐");
-  logIndex(
-    `🕸️ Voy is removing the new phrase "${newPhrase[0]}" from the index ...`
-  );
-
-  index = voy.remove({ embeddings: addition });
-  logIndex(
-    `🕸️ Voy is searching for the nearest neighbors of "${initialQuery}" ...`
-  );
-
-  logIndex(`🕸️ Voy is indexed ✔️ ...`);
-  logIndex("🕸️ --- Voy similarity search result ---");
-
-  voy.search(q.result, 3).neighbors.forEach((result, i) => {
-    if (i === 0) {
-      logIndex(`🥇  "${result.title}"`);
-    } else if (i === 1) {
-      logIndex(`🥈  "${result.title}"`);
-    } else if (i === 2) {
-      logIndex(`🥉  "${result.title}"`);
-    } else {
-      logIndex(`🕸️  "${result.title}"`);
-    }
-  });
-
-  logIndex("⮐");
-  logIndex(`🕸️ Voy is serializing ...`);
-
-  const serialized = voy.serialize();
-  logIndex(`🕸️ Voy is serialized ✔️ ...`);
-
-  logIndex(`🕸️ Voy is deserializing ...`);
-
-  const deserializedVoy = Voy.deserialize(serialized);
-  logIndex(`🕸️ Voy is deserialized ✔️ ...`);
-
-  logIndex("🕸️ --- Deserialized Voy similarity search result ---");
-  deserializedVoy.search(q.result, 3).neighbors.forEach((result, i) => {
-    if (i === 0) {
-      logIndex(`🥇  "${result.title}"`);
-    } else if (i === 1) {
-      logIndex(`🥈  "${result.title}"`);
-    } else if (i === 2) {
-      logIndex(`🥉  "${result.title}"`);
-    } else {
-      logIndex(`🕸️  "${result.title}"`);
-    }
-  });
-
-  logIndex("⮐");
-  logIndex(`🕸️ Voy is clearing the index ...`);
-
-  voy.clear();
-  deserializedVoy.clear();
-
-  logIndex(`🕸️ Voy is cleared ✔️ ...`);
-  logIndex(`✨ Done in ${timer.stop()}s`);
+const elements = {
+  addForm: document.querySelector("#add-form"),
+  addButton: document.querySelector("#add-button"),
+  corpusList: document.querySelector("#corpus-list"),
+  queryInput: document.querySelector("#query-input"),
+  resetButton: document.querySelector("#reset-button"),
+  results: document.querySelector("#results"),
+  searchButton: document.querySelector("#search-button"),
+  searchForm: document.querySelector("#search-form"),
+  status: document.querySelector("#status"),
+  textInput: document.querySelector("#text-input"),
+  titleInput: document.querySelector("#title-input"),
 };
 
-main();
+const workerRequests = new Map();
+
+function setStatus(message, tone = "info") {
+  elements.status.textContent = message;
+  elements.status.dataset.tone = tone;
+}
+
+function setBusy(button, busy, pendingLabel) {
+  button.disabled = busy;
+  button.dataset.pendingLabel ||= button.textContent;
+  button.textContent = busy ? pendingLabel : button.dataset.pendingLabel;
+}
+
+function createResourceEntry(entry) {
+  return {
+    embeddings: [
+      {
+        id: entry.id,
+        title: entry.title,
+        url: entry.url,
+        embeddings: entry.embedding,
+      },
+    ],
+  };
+}
+
+function truncate(text, length = 160) {
+  return text.length <= length ? text : `${text.slice(0, length - 1)}…`;
+}
+
+function renderCorpus() {
+  if (entries.length === 0) {
+    elements.corpusList.innerHTML = '<div class="empty">The corpus is empty.</div>';
+    return;
+  }
+
+  elements.corpusList.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+
+  for (const entry of entries) {
+    const card = document.createElement("article");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-head">
+        <div>
+          <h3>${escapeHtml(entry.title)}</h3>
+          <span class="badge">id: ${escapeHtml(entry.id)}</span>
+        </div>
+        <button class="ghost" data-remove-id="${escapeHtml(entry.id)}" type="button">Remove</button>
+      </div>
+      <p>${escapeHtml(truncate(entry.text, 200))}</p>
+    `;
+    fragment.append(card);
+  }
+
+  elements.corpusList.append(fragment);
+}
+
+function renderResults(query, neighbors) {
+  if (neighbors.length === 0) {
+    elements.results.innerHTML = '<div class="empty">No neighbors returned for this query.</div>';
+    return;
+  }
+
+  elements.results.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+
+  neighbors.forEach((neighbor, index) => {
+    const entry = entries.find((candidate) => candidate.id === neighbor.id);
+    const card = document.createElement("article");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-head">
+        <div>
+          <p class="badge">Rank ${index + 1}</p>
+          <h3 class="result-title">${escapeHtml(neighbor.title)}</h3>
+        </div>
+      </div>
+      <p class="result-snippet">${escapeHtml(truncate(entry?.text ?? query, 200))}</p>
+    `;
+    fragment.append(card);
+  });
+
+  elements.results.append(fragment);
+}
+
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function requestEmbedding(texts) {
+  const requestId = crypto.randomUUID();
+
+  return new Promise((resolve, reject) => {
+    workerRequests.set(requestId, { resolve, reject });
+    worker.postMessage({ requestId, type: "embed", texts });
+  });
+}
+
+function wireWorker() {
+  worker = new Worker("./embed-worker.js", { type: "module" });
+
+  worker.addEventListener("message", (event) => {
+    const { requestId, type, embedding, embeddings, message } = event.data;
+    if (type === "ready") {
+      setStatus("Embedding model ready. Add text or start searching.");
+      return;
+    }
+
+    const handlers = workerRequests.get(requestId);
+    if (!handlers) {
+      return;
+    }
+
+    workerRequests.delete(requestId);
+
+    if (type === "error") {
+      handlers.reject(new Error(message));
+      return;
+    }
+
+    handlers.resolve(embedding ?? embeddings);
+  });
+}
+
+function buildResourceFromEntries(sourceEntries) {
+  return {
+    embeddings: sourceEntries.map((entry) => ({
+      id: entry.id,
+      title: entry.title,
+      url: entry.url,
+      embeddings: entry.embedding,
+    })),
+  };
+}
+
+async function loadVoy() {
+  const voyModule = await import("voy-search");
+  await voyModule.default();
+  const { Voy } = voyModule;
+  voy = new Voy(undefined, { metric: "cosine" });
+}
+
+async function seedCorpus() {
+  setStatus("Generating embeddings for the sample corpus...");
+  const embeddings = await requestEmbedding(SAMPLE_DOCUMENTS.map((document) => document.text));
+  entries = SAMPLE_DOCUMENTS.map((document, index) => ({
+    id: crypto.randomUUID(),
+    title: document.title,
+    text: document.text,
+    url: `/docs/${index + 1}`,
+    embedding: Array.from(embeddings[index]),
+  }));
+  await voy.index(buildResourceFromEntries(entries), { metric: "cosine" });
+  renderCorpus();
+  renderResults("", []);
+  setStatus("Sample corpus loaded. Try a search or add your own text.");
+}
+
+async function handleAdd(event) {
+  event.preventDefault();
+
+  const title = elements.titleInput.value.trim();
+  const text = elements.textInput.value.trim();
+
+  if (!title || !text) {
+    setStatus("Title and text are both required.", "error");
+    return;
+  }
+
+  setBusy(elements.addButton, true, "Embedding...");
+  currentAddToken += 1;
+  const token = currentAddToken;
+
+  try {
+    const [embedding] = await requestEmbedding([text]);
+    if (token !== currentAddToken) {
+      return;
+    }
+
+    const entry = {
+      id: crypto.randomUUID(),
+      title,
+      text,
+      url: `/docs/${entries.length + 1}`,
+      embedding: Array.from(embedding),
+    };
+
+    entries = [...entries, entry];
+    await voy.add(createResourceEntry(entry));
+    renderCorpus();
+    elements.addForm.reset();
+    setStatus(`Added "${title}" to the corpus.`);
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    setBusy(elements.addButton, false, "Embedding...");
+  }
+}
+
+async function handleSearch(event) {
+  event.preventDefault();
+
+  const query = elements.queryInput.value.trim();
+  if (!query) {
+    setStatus("Enter a query before searching.", "error");
+    return;
+  }
+
+  if (entries.length === 0) {
+    setStatus("The corpus is empty. Add some text first.", "error");
+    return;
+  }
+
+  setBusy(elements.searchButton, true, "Searching...");
+  currentSearchToken += 1;
+  const token = currentSearchToken;
+
+  try {
+    const [embedding] = await requestEmbedding([query]);
+    if (token !== currentSearchToken) {
+      return;
+    }
+
+    const result = await voy.search(Array.from(embedding), Math.min(5, entries.length));
+    renderResults(query, result.neighbors);
+    setStatus(`Found ${result.neighbors.length} results for your query.`);
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    setBusy(elements.searchButton, false, "Searching...");
+  }
+}
+
+async function handleRemove(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLButtonElement)) {
+    return;
+  }
+
+  const id = target.dataset.removeId;
+  if (!id) {
+    return;
+  }
+
+  const entry = entries.find((candidate) => candidate.id === id);
+  if (!entry) {
+    return;
+  }
+
+  target.disabled = true;
+
+  try {
+    await voy.remove(createResourceEntry(entry));
+    entries = entries.filter((candidate) => candidate.id !== id);
+    renderCorpus();
+    renderResults("", []);
+    setStatus(`Removed "${entry.title}" from the corpus.`);
+  } catch (error) {
+    target.disabled = false;
+    setStatus(error.message, "error");
+  }
+}
+
+async function handleReset() {
+  setBusy(elements.resetButton, true, "Resetting...");
+  try {
+    entries = [];
+    voy.clear();
+    renderCorpus();
+    renderResults("", []);
+    await seedCorpus();
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    setBusy(elements.resetButton, false, "Resetting...");
+  }
+}
+
+async function main() {
+  wireWorker();
+  setStatus("Loading Voy and starting the embedding worker...");
+  await loadVoy();
+
+  elements.addForm.addEventListener("submit", handleAdd);
+  elements.searchForm.addEventListener("submit", handleSearch);
+  elements.corpusList.addEventListener("click", handleRemove);
+  elements.resetButton.addEventListener("click", handleReset);
+
+  await seedCorpus();
+}
+
+main().catch((error) => {
+  console.error(error);
+  setStatus(error.message, "error");
+});

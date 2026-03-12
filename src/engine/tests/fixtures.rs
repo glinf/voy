@@ -1,5 +1,5 @@
+use crate::{EmbeddedResource, Resource};
 use rstest::fixture;
-use crate::{Resource, EmbeddedResource};
 
 #[fixture]
 pub fn content_fixture() -> [&'static str; 6] {
@@ -38,7 +38,7 @@ pub static CONTENT: [&str; 6] = [
     "(2,700,000 sq mi), of which 5,500,000 km2 (2,100,000 sq mi) are covered by the rainforest. This region includes",
     "includes territory belonging to nine nations and 3,344 formally acknowledged indigenous territories.",
     "The majority of the forest, 60%, is in Brazil, followed by Peru with 13%, Colombia with 10%, and with minor amounts in",
-    "amounts in Bolivia, Ecuador, French Guiana, Guyana, Suriname, and Venezuela. Four nations have \"Amazonas\" as the",  
+    "amounts in Bolivia, Ecuador, French Guiana, Guyana, Suriname, and Venezuela. Four nations have \"Amazonas\" as the",
 ];
 
 pub static EMBEDDING: [[f32; 768]; 6] = [
