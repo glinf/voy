@@ -45,6 +45,7 @@ interface SearchResult {
     id: string;
     title: string;
     url: string;
+    score: number;
   }>;
 }
 
@@ -100,6 +101,7 @@ const voy = new Voy(resource, { metric: "cosine" });
 const result = voy.search([0.11, -0.01, 0.87], 1);
 
 console.log(result.neighbors[0].title);
+console.log(result.neighbors[0].score);
 
 const bytes = voy.serialize();
 const restored = Voy.deserialize(bytes);
@@ -111,6 +113,9 @@ console.log(restored.size());
 This repo now ships one maintained example in [examples/create-wasm-app](./examples/create-wasm-app):
 
 - local embeddings in a Worker
+- shard-managed browser retrieval on top of `Voy`
+- OPFS-backed persistence so reloads do not re-embed
+- BM25-style reranking on the vector candidate set
 - add/remove/search corpus interactions
 - static build suitable for GitHub Pages
 

@@ -14,6 +14,12 @@ pub struct Document {
     pub url: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub document: Document,
+    pub score: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metric {
     Euclidean,
@@ -102,7 +108,7 @@ pub fn index(resource: Resource, metric: Metric) -> anyhow::Result<Index> {
     Ok(index)
 }
 
-pub fn search(index: &Index, query: &[f32], k: usize) -> anyhow::Result<Vec<Document>> {
+pub fn search(index: &Index, query: &[f32], k: usize) -> anyhow::Result<Vec<SearchHit>> {
     if k == 0 || index.documents.is_empty() {
         return Ok(Vec::new());
     }
@@ -149,7 +155,13 @@ pub fn search(index: &Index, query: &[f32], k: usize) -> anyhow::Result<Vec<Docu
 
     Ok(hits
         .into_iter()
-        .map(|hit| index.documents[hit.index].clone())
+        .map(|hit| SearchHit {
+            document: index.documents[hit.index].clone(),
+            score: match index.metric {
+                Metric::Euclidean => hit.rank_score,
+                Metric::Cosine => -hit.rank_score,
+            },
+        })
         .collect())
 }
 
@@ -285,19 +297,32 @@ pub fn deserialize(bytes: &[u8]) -> anyhow::Result<Index> {
         "serialized index vector payload size is invalid"
     );
 
-    let mut vectors = Vec::with_capacity(count.saturating_mul(dimension));
-    while cursor < bytes.len() {
-        let slice = bytes
-            .get(cursor..cursor + 4)
-            .context("serialized index ended unexpectedly while reading vector payload")?;
-        let value = f32::from_le_bytes(slice.try_into().unwrap());
-        ensure!(
-            value.is_finite(),
-            "serialized vector payload contains non-finite values"
-        );
-        vectors.push(value);
-        cursor += 4;
+    let total_floats = count.saturating_mul(dimension);
+    let vector_bytes = &bytes[cursor..];
+    let mut vectors = vec![0.0f32; total_floats];
+
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: lengths verified above, source/destination do not overlap
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                vector_bytes.as_ptr(),
+                vectors.as_mut_ptr() as *mut u8,
+                expected_vector_bytes,
+            );
+        }
     }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for (i, chunk) in vector_bytes.chunks_exact(4).enumerate() {
+            vectors[i] = f32::from_le_bytes(chunk.try_into().unwrap());
+        }
+    }
+
+    ensure!(
+        vectors.iter().all(|v| v.is_finite()),
+        "serialized vector payload contains non-finite values"
+    );
 
     Ok(Index {
         dimension: (dimension != 0).then_some(dimension),
@@ -376,6 +401,35 @@ fn normalize(vector: &mut [f32]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn squared_euclidean(left: &[f32], right: &[f32]) -> f32 {
+    use core::arch::wasm32::*;
+
+    let chunks = left.len() / 4;
+    let mut acc = f32x4_splat(0.0);
+
+    for i in 0..chunks {
+        let offset = i * 4;
+        let l = unsafe { v128_load(left.as_ptr().add(offset) as *const v128) };
+        let r = unsafe { v128_load(right.as_ptr().add(offset) as *const v128) };
+        let diff = f32x4_sub(l, r);
+        acc = f32x4_add(acc, f32x4_mul(diff, diff));
+    }
+
+    let mut sum = f32x4_extract_lane::<0>(acc)
+        + f32x4_extract_lane::<1>(acc)
+        + f32x4_extract_lane::<2>(acc)
+        + f32x4_extract_lane::<3>(acc);
+
+    for i in (chunks * 4)..left.len() {
+        let diff = left[i] - right[i];
+        sum += diff * diff;
+    }
+
+    sum
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 fn squared_euclidean(left: &[f32], right: &[f32]) -> f32 {
     left.iter()
         .zip(right.iter())
@@ -386,6 +440,33 @@ fn squared_euclidean(left: &[f32], right: &[f32]) -> f32 {
         .sum()
 }
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn dot_product(left: &[f32], right: &[f32]) -> f32 {
+    use core::arch::wasm32::*;
+
+    let chunks = left.len() / 4;
+    let mut acc = f32x4_splat(0.0);
+
+    for i in 0..chunks {
+        let offset = i * 4;
+        let l = unsafe { v128_load(left.as_ptr().add(offset) as *const v128) };
+        let r = unsafe { v128_load(right.as_ptr().add(offset) as *const v128) };
+        acc = f32x4_add(acc, f32x4_mul(l, r));
+    }
+
+    let mut sum = f32x4_extract_lane::<0>(acc)
+        + f32x4_extract_lane::<1>(acc)
+        + f32x4_extract_lane::<2>(acc)
+        + f32x4_extract_lane::<3>(acc);
+
+    for i in (chunks * 4)..left.len() {
+        sum += left[i] * right[i];
+    }
+
+    sum
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 fn dot_product(left: &[f32], right: &[f32]) -> f32 {
     left.iter()
         .zip(right.iter())

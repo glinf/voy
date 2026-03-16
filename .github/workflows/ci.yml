@@ -31,7 +31,7 @@ jobs:
         run: cargo test
 
       - name: Build wasm package
-        run: wasm-pack build --target web --out-dir pkg
+        run: RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --out-dir pkg
 
       - name: Run browser wasm tests
         run: wasm-pack test --headless --firefox
@@ -39,6 +39,10 @@ jobs:
       - name: Install demo dependencies
         working-directory: examples/create-wasm-app
         run: npm ci
+
+      - name: Run demo tests
+        working-directory: examples/create-wasm-app
+        run: npm test
 
       - name: Build demo
         working-directory: examples/create-wasm-app

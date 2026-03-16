@@ -39,6 +39,7 @@ fn voy_round_trips_binary_indexes() {
     let result = deserialized.search(vec![1.0, 0.0, 0.0], 1).unwrap();
 
     assert_eq!(result.neighbors[0].title, "alpha");
+    assert!(result.neighbors[0].score.is_finite());
 }
 
 #[test]
@@ -54,6 +55,7 @@ fn standalone_functions_match_instance_api() {
     assert_eq!(instance.neighbors.len(), free_fn.neighbors.len());
     assert_eq!(instance.neighbors[0].title, free_fn.neighbors[0].title);
     assert_eq!(instance.neighbors[1].title, free_fn.neighbors[1].title);
+    assert_eq!(instance.neighbors[0].score, free_fn.neighbors[0].score);
 }
 
 #[test]

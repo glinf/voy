@@ -23,12 +23,12 @@ fn it_returns_legacy_vector_search_result(
     let index = engine::index(resource_fixture, engine::Metric::Euclidean).unwrap();
     let result = engine::search(&index, &question_fixture, 6).unwrap();
 
-    assert_eq!(result[0].title, content_fixture[0]);
-    assert_eq!(result[1].title, content_fixture[1]);
-    assert_eq!(result[2].title, content_fixture[2]);
-    assert_eq!(result[3].title, content_fixture[4]);
-    assert_eq!(result[4].title, content_fixture[5]);
-    assert_eq!(result[5].title, content_fixture[3]);
+    assert_eq!(result[0].document.title, content_fixture[0]);
+    assert_eq!(result[1].document.title, content_fixture[1]);
+    assert_eq!(result[2].document.title, content_fixture[2]);
+    assert_eq!(result[3].document.title, content_fixture[4]);
+    assert_eq!(result[4].document.title, content_fixture[5]);
+    assert_eq!(result[5].document.title, content_fixture[3]);
 }
 
 #[rstest]
@@ -103,9 +103,10 @@ fn it_round_trips_the_binary_index(resource_fixture: Resource, question_fixture:
     let round_tripped = engine::search(&deserialized, &question_fixture, 3).unwrap();
 
     assert_eq!(original.len(), round_tripped.len());
-    assert_eq!(original[0].title, round_tripped[0].title);
-    assert_eq!(original[1].title, round_tripped[1].title);
-    assert_eq!(original[2].title, round_tripped[2].title);
+    assert_eq!(original[0].document.title, round_tripped[0].document.title);
+    assert_eq!(original[1].document.title, round_tripped[1].document.title);
+    assert_eq!(original[2].document.title, round_tripped[2].document.title);
+    assert_eq!(original[0].score, round_tripped[0].score);
 }
 
 #[test]
@@ -178,7 +179,8 @@ fn it_supports_cosine_search() {
     let index = engine::index(resource, engine::Metric::Cosine).unwrap();
     let result = engine::search(&index, &[2.0, 2.0, 0.0], 3).unwrap();
 
-    assert_eq!(result[0].title, "diag");
+    assert_eq!(result[0].document.title, "diag");
+    assert!(result[0].score > result[1].score);
 }
 
 #[rstest]

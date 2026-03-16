@@ -67,10 +67,11 @@ impl Voy {
         Ok(SearchResult {
             neighbors: neighbors
                 .into_iter()
-                .map(|document| Neighbor {
-                    id: document.id,
-                    title: document.title,
-                    url: document.url,
+                .map(|hit| Neighbor {
+                    id: hit.document.id,
+                    title: hit.document.title,
+                    url: hit.document.url,
+                    score: hit.score,
                 })
                 .collect(),
         })

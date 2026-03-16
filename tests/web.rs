@@ -45,6 +45,7 @@ fn public_api_round_trips_binary_indexes() {
     let result = restored.search(vec![1.0, 0.0, 0.0], 1).unwrap();
 
     assert_eq!(result.neighbors[0].title, "alpha");
+    assert!(result.neighbors[0].score.is_finite());
 }
 
 #[wasm_bindgen_test]
@@ -54,6 +55,7 @@ fn standalone_functions_work_in_browser() {
     let result = search(serialized, vec![0.5, 0.5, 0.0], 3).unwrap();
 
     assert_eq!(result.neighbors[0].title, "gamma");
+    assert!(result.neighbors[0].score.is_finite());
 }
 
 #[wasm_bindgen_test]

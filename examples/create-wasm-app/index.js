@@ -1,3 +1,22 @@
+import { OpfsVoyStore } from "./lib/opfs-store.mjs";
+import { VoyShardManager } from "./lib/shard-manager.mjs";
+
+function checkBrowserSupport() {
+  const simdTest = new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123,
+    3, 2, 1, 0, 10, 8, 1, 6, 0, 65, 0, 253, 15, 11,
+  ]);
+
+  try {
+    new WebAssembly.Module(simdTest);
+  } catch {
+    throw new Error(
+      "This browser does not support WebAssembly SIMD. " +
+      "Please use Chrome 91+, Firefox 89+, or Safari 16.4+."
+    );
+  }
+}
+
 const SAMPLE_DOCUMENTS = [
   {
     title: "Amazon rainforest overview",
@@ -13,8 +32,7 @@ const SAMPLE_DOCUMENTS = [
   },
 ];
 
-let voy;
-let entries = [];
+let manager;
 let worker;
 let currentSearchToken = 0;
 let currentAddToken = 0;
@@ -46,24 +64,20 @@ function setBusy(button, busy, pendingLabel) {
   button.textContent = busy ? pendingLabel : button.dataset.pendingLabel;
 }
 
-function createResourceEntry(entry) {
-  return {
-    embeddings: [
-      {
-        id: entry.id,
-        title: entry.title,
-        url: entry.url,
-        embeddings: entry.embedding,
-      },
-    ],
-  };
-}
-
 function truncate(text, length = 160) {
-  return text.length <= length ? text : `${text.slice(0, length - 1)}…`;
+  return text.length <= length ? text : `${text.slice(0, length - 1)}...`;
 }
 
-function renderCorpus() {
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+async function renderCorpus() {
+  const entries = manager ? await manager.listDocuments() : [];
   if (entries.length === 0) {
     elements.corpusList.innerHTML = '<div class="empty">The corpus is empty.</div>';
     return;
@@ -80,10 +94,11 @@ function renderCorpus() {
         <div>
           <h3>${escapeHtml(entry.title)}</h3>
           <span class="badge">id: ${escapeHtml(entry.id)}</span>
+          <span class="badge">${escapeHtml(entry.shardId)}</span>
         </div>
         <button class="ghost" data-remove-id="${escapeHtml(entry.id)}" type="button">Remove</button>
       </div>
-      <p>${escapeHtml(truncate(entry.text, 200))}</p>
+      <p>${escapeHtml(truncate(entry.excerpt ?? "", 200))}</p>
     `;
     fragment.append(card);
   }
@@ -91,8 +106,8 @@ function renderCorpus() {
   elements.corpusList.append(fragment);
 }
 
-function renderResults(query, neighbors) {
-  if (neighbors.length === 0) {
+function renderResults(query, result) {
+  if (result.results.length === 0) {
     elements.results.innerHTML = '<div class="empty">No neighbors returned for this query.</div>';
     return;
   }
@@ -100,31 +115,26 @@ function renderResults(query, neighbors) {
   elements.results.innerHTML = "";
   const fragment = document.createDocumentFragment();
 
-  neighbors.forEach((neighbor, index) => {
-    const entry = entries.find((candidate) => candidate.id === neighbor.id);
+  result.results.forEach((entry, index) => {
     const card = document.createElement("article");
     card.className = "card";
     card.innerHTML = `
       <div class="card-head">
         <div>
           <p class="badge">Rank ${index + 1}</p>
-          <h3 class="result-title">${escapeHtml(neighbor.title)}</h3>
+          <span class="badge">${escapeHtml(entry.shardId)}</span>
+          <h3 class="result-title">${escapeHtml(entry.title)}</h3>
         </div>
       </div>
-      <p class="result-snippet">${escapeHtml(truncate(entry?.text ?? query, 200))}</p>
+      <p class="result-snippet">${escapeHtml(truncate(entry.text ?? query, 220))}</p>
+      <p class="badge">final ${entry.finalScore.toFixed(3)}</p>
+      <p class="badge">vector ${entry.vectorScore.toFixed(3)}</p>
+      <p class="badge">lexical ${entry.lexicalScore.toFixed(3)}</p>
     `;
     fragment.append(card);
   });
 
   elements.results.append(fragment);
-}
-
-function escapeHtml(value) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
 }
 
 function requestEmbedding(texts) {
@@ -142,7 +152,7 @@ function wireWorker() {
   worker.addEventListener("message", (event) => {
     const { requestId, type, embedding, embeddings, message } = event.data;
     if (type === "ready") {
-      setStatus("Embedding model ready. Add text or start searching.");
+      setStatus("Embedding worker ready. Opening OPFS and loading shards...");
       return;
     }
 
@@ -162,38 +172,54 @@ function wireWorker() {
   });
 }
 
-function buildResourceFromEntries(sourceEntries) {
-  return {
-    embeddings: sourceEntries.map((entry) => ({
-      id: entry.id,
-      title: entry.title,
-      url: entry.url,
-      embeddings: entry.embedding,
-    })),
-  };
-}
-
-async function loadVoy() {
+async function loadManager() {
   const voyModule = await import("voy-search");
   await voyModule.default();
   const { Voy } = voyModule;
-  voy = new Voy(undefined, { metric: "cosine" });
+
+  manager = await VoyShardManager.open({
+    Voy,
+    store: new OpfsVoyStore("voy-demo"),
+    metric: "cosine",
+    maxDocsPerShard: 2,
+    maxShardsPerSearch: 3,
+    oversample: 5,
+    model: {
+      id: "mixedbread-ai/mxbai-embed-xsmall-v1",
+      normalized: true,
+    },
+  });
 }
 
 async function seedCorpus() {
-  setStatus("Generating embeddings for the sample corpus...");
+  setStatus("Generating embeddings for the sample corpus and sealing initial shards...");
   const embeddings = await requestEmbedding(SAMPLE_DOCUMENTS.map((document) => document.text));
-  entries = SAMPLE_DOCUMENTS.map((document, index) => ({
+  const documents = SAMPLE_DOCUMENTS.map((document, index) => ({
     id: crypto.randomUUID(),
     title: document.title,
     text: document.text,
     url: `/docs/${index + 1}`,
     embedding: Array.from(embeddings[index]),
   }));
-  await voy.index(buildResourceFromEntries(entries), { metric: "cosine" });
-  renderCorpus();
-  renderResults("", []);
-  setStatus("Sample corpus loaded. Try a search or add your own text.");
+  await manager.addMany(documents);
+  await renderCorpus();
+  renderResults("", { results: [] });
+  setStatus(
+    `Sample corpus saved to OPFS. ${manager.documentCount()} docs across ${manager.shardCount()} shards.`,
+  );
+}
+
+async function restoreOrSeedCorpus() {
+  if (manager.isEmpty()) {
+    await seedCorpus();
+    return;
+  }
+
+  await renderCorpus();
+  renderResults("", { results: [] });
+  setStatus(
+    `Loaded ${manager.documentCount()} docs from OPFS across ${manager.shardCount()} shards. No re-embedding was needed.`,
+  );
 }
 
 async function handleAdd(event) {
@@ -217,19 +243,19 @@ async function handleAdd(event) {
       return;
     }
 
-    const entry = {
+    await manager.add({
       id: crypto.randomUUID(),
       title,
       text,
-      url: `/docs/${entries.length + 1}`,
+      url: `/docs/${Date.now()}`,
       embedding: Array.from(embedding),
-    };
+    });
 
-    entries = [...entries, entry];
-    await voy.add(createResourceEntry(entry));
-    renderCorpus();
+    await renderCorpus();
     elements.addForm.reset();
-    setStatus(`Added "${title}" to the corpus.`);
+    setStatus(
+      `Added "${title}". Corpus now spans ${manager.documentCount()} docs across ${manager.shardCount()} shards.`,
+    );
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
@@ -246,7 +272,7 @@ async function handleSearch(event) {
     return;
   }
 
-  if (entries.length === 0) {
+  if (manager.isEmpty()) {
     setStatus("The corpus is empty. Add some text first.", "error");
     return;
   }
@@ -261,9 +287,15 @@ async function handleSearch(event) {
       return;
     }
 
-    const result = await voy.search(Array.from(embedding), Math.min(5, entries.length));
-    renderResults(query, result.neighbors);
-    setStatus(`Found ${result.neighbors.length} results for your query.`);
+    const result = await manager.search({
+      queryText: query,
+      embedding,
+      k: Math.min(5, manager.documentCount()),
+    });
+    renderResults(query, result);
+    setStatus(
+      `Found ${result.results.length} results after routing across ${result.shards.length} shards.`,
+    );
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
@@ -282,19 +314,18 @@ async function handleRemove(event) {
     return;
   }
 
-  const entry = entries.find((candidate) => candidate.id === id);
-  if (!entry) {
-    return;
-  }
+  const title = target.closest(".card")?.querySelector("h3")?.textContent ?? id;
 
   target.disabled = true;
 
   try {
-    await voy.remove(createResourceEntry(entry));
-    entries = entries.filter((candidate) => candidate.id !== id);
-    renderCorpus();
-    renderResults("", []);
-    setStatus(`Removed "${entry.title}" from the corpus.`);
+    await manager.remove(id);
+    await manager.compact();
+    await renderCorpus();
+    renderResults("", { results: [] });
+    setStatus(
+      `Removed "${title}". Corpus now spans ${manager.documentCount()} docs across ${manager.shardCount()} shards.`,
+    );
   } catch (error) {
     target.disabled = false;
     setStatus(error.message, "error");
@@ -304,10 +335,9 @@ async function handleRemove(event) {
 async function handleReset() {
   setBusy(elements.resetButton, true, "Resetting...");
   try {
-    entries = [];
-    voy.clear();
-    renderCorpus();
-    renderResults("", []);
+    await manager.reset();
+    await renderCorpus();
+    renderResults("", { results: [] });
     await seedCorpus();
   } catch (error) {
     setStatus(error.message, "error");
@@ -317,16 +347,17 @@ async function handleReset() {
 }
 
 async function main() {
+  checkBrowserSupport();
   wireWorker();
-  setStatus("Loading Voy and starting the embedding worker...");
-  await loadVoy();
+  setStatus("Loading Voy, opening OPFS, and starting the embedding worker...");
+  await loadManager();
 
   elements.addForm.addEventListener("submit", handleAdd);
   elements.searchForm.addEventListener("submit", handleSearch);
   elements.corpusList.addEventListener("click", handleRemove);
   elements.resetButton.addEventListener("click", handleReset);
 
-  await seedCorpus();
+  await restoreOrSeedCorpus();
 }
 
 main().catch((error) => {

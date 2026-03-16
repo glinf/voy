@@ -44,6 +44,10 @@ jobs:
         working-directory: examples/create-wasm-app
         run: npm ci
 
+      - name: Run demo tests
+        working-directory: examples/create-wasm-app
+        run: npm test
+
       - name: Build demo
         working-directory: examples/create-wasm-app
         run: npm run build
