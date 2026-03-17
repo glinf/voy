@@ -249,7 +249,14 @@ pub fn serialize(index: &Index) -> anyhow::Result<Vec<u8>> {
         "document count exceeds u32 storage"
     );
 
-    let mut bytes = Vec::new();
+    let string_bytes: usize = index
+        .documents
+        .iter()
+        .map(|d| 12 + d.id.len() + d.title.len() + d.url.len())
+        .sum();
+    let vector_bytes = index.vectors.len() * std::mem::size_of::<f32>();
+    let mut bytes = Vec::with_capacity(11 + string_bytes + vector_bytes);
+
     bytes.extend_from_slice(FORMAT_MAGIC);
     bytes.push(index.metric.as_byte());
     bytes.extend_from_slice(&(dimension as u16).to_le_bytes());
@@ -261,8 +268,21 @@ pub fn serialize(index: &Index) -> anyhow::Result<Vec<u8>> {
         write_string(&mut bytes, &document.url)?;
     }
 
-    for value in &index.vectors {
-        bytes.extend_from_slice(&value.to_le_bytes());
+    #[cfg(target_endian = "little")]
+    {
+        let raw = unsafe {
+            std::slice::from_raw_parts(
+                index.vectors.as_ptr() as *const u8,
+                vector_bytes,
+            )
+        };
+        bytes.extend_from_slice(raw);
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        for value in &index.vectors {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
     }
 
     Ok(bytes)

@@ -23,11 +23,10 @@ function print(msg) {
   console.log(msg);
 }
 
-const MAX_DOCS = 300_000;
-const SIZES = [100, 500, 1000, 5000, 10000, 50000, 300000];
+const MAX_DOCS = 500_000;
+const SIZES = [100, 500, 1000, 5000, 10000, 100000, 300000, 500000];
 const K_VALUES = [1, 5, 10, 25, 50, 100];
-const WARMUP = 3;
-const RUNS = 10;
+const LARGE_THRESHOLD = 50000;
 
 function median(arr) {
   const sorted = [...arr].sort((a, b) => a - b);
@@ -35,7 +34,9 @@ function median(arr) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function measure(fn, warmup = WARMUP, runs = RUNS) {
+function measure(fn, n = 0) {
+  const warmup = n >= LARGE_THRESHOLD ? 1 : 3;
+  const runs = n >= LARGE_THRESHOLD ? 3 : 10;
   for (let i = 0; i < warmup; i++) fn();
   const times = [];
   for (let i = 0; i < runs; i++) {
@@ -72,7 +73,7 @@ async function run() {
   const wasm = await init("/pkg/voy_search_bg.wasm");
   print("WASM initialized");
 
-  const allDocs = await loadEmails("/10k_emails.json", MAX_DOCS);
+  const allDocs = await loadEmails("/300k_emails.json", MAX_DOCS);
   print(`Loaded ${allDocs.length} documents`);
 
   const query = generateQuery();
@@ -86,7 +87,7 @@ async function run() {
     const timing = measure(() => {
       const v = buildVoy(docs);
       v.free();
-    });
+    }, n);
     results.batchIndex.push({ n, ...timing });
     print(`  n=${n}: ${timing.median.toFixed(2)}ms`);
   }
@@ -109,7 +110,7 @@ async function run() {
   for (const n of SIZES) {
     const docs = allDocs.slice(0, n);
     const voy = buildVoy(docs);
-    const timing = measure(() => voy.search(query, 10));
+    const timing = measure(() => voy.search(query, 10), n);
     results.searchVsSize.push({ n, ...timing });
     print(`  n=${n}: ${timing.median.toFixed(2)}ms`);
     voy.free();
@@ -121,7 +122,7 @@ async function run() {
   {
     const voy = buildVoy(allDocs);
     for (const k of K_VALUES) {
-      const timing = measure(() => voy.search(query, k));
+      const timing = measure(() => voy.search(query, k), allDocs.length);
       results.searchVsK.push({ k, ...timing });
       print(`  k=${k}: ${timing.median.toFixed(2)}ms`);
     }
@@ -139,8 +140,7 @@ async function run() {
         const timing = measure(() => {
           voy.add(makeResource([doc]));
           voy.remove(makeResource([doc]));
-        });
-        // Do the actual add after measuring
+        }, i);
         voy.add(makeResource([doc]));
         results.addLatency.push({ size: i, ...timing });
         print(`  size=${i}: ${timing.median.toFixed(2)}ms`);
@@ -164,7 +164,7 @@ async function run() {
         const timing = measure(() => {
           voy.remove(makeResource([doc]));
           voy.add(makeResource([doc]));
-        });
+        }, currentSize);
         voy.remove(makeResource([doc]));
         results.removeLatency.push({ size: currentSize, ...timing });
         print(`  size=${currentSize}: ${timing.median.toFixed(2)}ms`);
@@ -181,12 +181,12 @@ async function run() {
   for (const n of SIZES) {
     const docs = allDocs.slice(0, n);
     const voy = buildVoy(docs);
-    const serTiming = measure(() => voy.serialize());
+    const serTiming = measure(() => voy.serialize(), n);
     const serialized = voy.serialize();
     const deserTiming = measure(() => {
       const v = Voy.deserialize(serialized);
       v.free();
-    });
+    }, n);
     results.serdeTime.push({
       n,
       serialize: serTiming,
