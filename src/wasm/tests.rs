@@ -84,3 +84,61 @@ fn cosine_metric_is_configurable() {
     let result = voy.search(vec![1.0, 0.0, 0.0], 1).unwrap();
     assert_eq!(result.neighbors[0].title, "alpha");
 }
+
+#[test]
+fn voy_index_replaces_existing_data() {
+    let mut voy = Voy::new(Some(resource()), None).unwrap();
+    assert_eq!(voy.size(), 2);
+
+    let new_resource = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "x".to_owned(),
+            title: "xi".to_owned(),
+            url: "/x".to_owned(),
+            embeddings: vec![0.0, 0.0, 1.0],
+        }],
+    };
+    voy.index(new_resource, None).unwrap();
+
+    assert_eq!(voy.size(), 1);
+    let result = voy.search(vec![0.0, 0.0, 1.0], 1).unwrap();
+    assert_eq!(result.neighbors[0].title, "xi");
+}
+
+#[test]
+fn voy_new_without_resource_creates_empty_index() {
+    let voy = Voy::new(None, None).unwrap();
+    assert_eq!(voy.size(), 0);
+
+    let result = voy.search(vec![1.0, 0.0, 0.0], 1).unwrap();
+    assert!(result.neighbors.is_empty());
+}
+
+#[test]
+fn voy_remove_and_clear_update_state() {
+    let mut voy = Voy::new(Some(resource()), None).unwrap();
+    assert_eq!(voy.size(), 2);
+
+    let target = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "a".to_owned(),
+            title: "alpha".to_owned(),
+            url: "/a".to_owned(),
+            embeddings: vec![1.0, 0.0, 0.0],
+        }],
+    };
+    voy.remove(target).unwrap();
+    assert_eq!(voy.size(), 1);
+
+    voy.clear();
+    assert_eq!(voy.size(), 0);
+}
+
+#[test]
+fn invalid_metric_string_is_rejected() {
+    let options = VoyOptions {
+        metric: Some("hamming".to_owned()),
+    };
+    let error = options.metric().unwrap_err();
+    assert!(error.to_string().contains("metric"));
+}

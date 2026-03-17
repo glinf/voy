@@ -202,3 +202,237 @@ fn it_keeps_the_same_size_when_removing_a_missing_document(
 
     assert_eq!(engine::size(&index), 6);
 }
+
+#[test]
+fn it_rejects_add_dimension_mismatch_on_existing_index() {
+    let resource = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "a".to_owned(),
+            title: "alpha".to_owned(),
+            url: "/a".to_owned(),
+            embeddings: vec![1.0, 0.0, 0.0],
+        }],
+    };
+    let mut index = engine::index(resource, engine::Metric::Euclidean).unwrap();
+
+    let bad = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "b".to_owned(),
+            title: "beta".to_owned(),
+            url: "/b".to_owned(),
+            embeddings: vec![1.0, 0.0],
+        }],
+    };
+    let error = engine::add(&mut index, &bad).unwrap_err();
+    assert!(error.to_string().contains("dimension"));
+}
+
+#[test]
+fn it_rejects_search_query_dimension_mismatch() {
+    let resource = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "a".to_owned(),
+            title: "alpha".to_owned(),
+            url: "/a".to_owned(),
+            embeddings: vec![1.0, 0.0, 0.0],
+        }],
+    };
+    let index = engine::index(resource, engine::Metric::Euclidean).unwrap();
+
+    let error = engine::search(&index, &[1.0, 0.0], 1).unwrap_err();
+    assert!(error.to_string().contains("3-dimensional"));
+}
+
+#[test]
+fn it_rejects_non_finite_embeddings() {
+    let resource = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "a".to_owned(),
+            title: "alpha".to_owned(),
+            url: "/a".to_owned(),
+            embeddings: vec![1.0, f32::NAN, 0.0],
+        }],
+    };
+
+    let error = engine::index(resource, engine::Metric::Euclidean).unwrap_err();
+    assert!(error.to_string().contains("finite"));
+}
+
+#[test]
+fn it_rejects_cosine_search_with_zero_norm_query() {
+    let resource = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "a".to_owned(),
+            title: "alpha".to_owned(),
+            url: "/a".to_owned(),
+            embeddings: vec![1.0, 0.0, 0.0],
+        }],
+    };
+    let index = engine::index(resource, engine::Metric::Cosine).unwrap();
+
+    let error = engine::search(&index, &[0.0, 0.0, 0.0], 1).unwrap_err();
+    assert!(error.to_string().contains("non-zero norm"));
+}
+
+#[test]
+fn it_resets_dimension_when_remove_empties_index() {
+    let resource = Resource {
+        embeddings: vec![EmbeddedResource {
+            id: "a".to_owned(),
+            title: "alpha".to_owned(),
+            url: "/a".to_owned(),
+            embeddings: vec![1.0, 0.0, 0.0],
+        }],
+    };
+    let mut index = engine::index(resource.clone(), engine::Metric::Euclidean).unwrap();
+    assert_eq!(index.dimension, Some(3));
+
+    engine::remove(&mut index, &resource).unwrap();
+    assert_eq!(index.dimension, None);
+}
+
+#[test]
+fn it_rejects_corrupted_magic_bytes() {
+    let mut bytes = vec![0u8; 11];
+    bytes[..4].copy_from_slice(b"BAD!");
+
+    let error = engine::deserialize(&bytes).unwrap_err();
+    assert!(error.to_string().contains("header"));
+}
+
+#[test]
+fn it_rejects_truncated_serialized_index() {
+    let error = engine::deserialize(&[0u8; 5]).unwrap_err();
+    assert!(error.to_string().contains("too short"));
+}
+
+#[test]
+fn it_round_trips_an_empty_index() {
+    let index = engine::Index::new(engine::Metric::Euclidean);
+    let serialized = engine::serialize(&index).unwrap();
+    let deserialized = engine::deserialize(&serialized).unwrap();
+
+    assert_eq!(deserialized.dimension, None);
+    assert!(deserialized.documents.is_empty());
+    assert!(deserialized.vectors.is_empty());
+}
+
+#[test]
+fn it_merges_results_from_multiple_shards() {
+    let shard1 = engine::index(
+        Resource {
+            embeddings: vec![EmbeddedResource {
+                id: "a".to_owned(),
+                title: "alpha".to_owned(),
+                url: "/a".to_owned(),
+                embeddings: vec![1.0, 0.0, 0.0],
+            }],
+        },
+        engine::Metric::Euclidean,
+    )
+    .unwrap();
+    let shard2 = engine::index(
+        Resource {
+            embeddings: vec![EmbeddedResource {
+                id: "b".to_owned(),
+                title: "beta".to_owned(),
+                url: "/b".to_owned(),
+                embeddings: vec![0.9, 0.1, 0.0],
+            }],
+        },
+        engine::Metric::Euclidean,
+    )
+    .unwrap();
+
+    let results =
+        engine::multi_shard_search(&[shard1, shard2], &[1.0, 0.0, 0.0], 2).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].document.title, "alpha");
+    assert_eq!(results[1].document.title, "beta");
+}
+
+#[test]
+fn it_truncates_multi_shard_results_to_k() {
+    let shard1 = engine::index(
+        Resource {
+            embeddings: vec![
+                EmbeddedResource {
+                    id: "a".to_owned(),
+                    title: "alpha".to_owned(),
+                    url: "/a".to_owned(),
+                    embeddings: vec![1.0, 0.0, 0.0],
+                },
+                EmbeddedResource {
+                    id: "b".to_owned(),
+                    title: "beta".to_owned(),
+                    url: "/b".to_owned(),
+                    embeddings: vec![0.0, 1.0, 0.0],
+                },
+            ],
+        },
+        engine::Metric::Euclidean,
+    )
+    .unwrap();
+    let shard2 = engine::index(
+        Resource {
+            embeddings: vec![
+                EmbeddedResource {
+                    id: "c".to_owned(),
+                    title: "gamma".to_owned(),
+                    url: "/c".to_owned(),
+                    embeddings: vec![0.5, 0.5, 0.0],
+                },
+                EmbeddedResource {
+                    id: "d".to_owned(),
+                    title: "delta".to_owned(),
+                    url: "/d".to_owned(),
+                    embeddings: vec![0.0, 0.0, 1.0],
+                },
+            ],
+        },
+        engine::Metric::Euclidean,
+    )
+    .unwrap();
+
+    let results =
+        engine::multi_shard_search(&[shard1, shard2], &[1.0, 0.0, 0.0], 2).unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn it_rejects_mixed_metrics_across_shards() {
+    let shard1 = engine::index(
+        Resource {
+            embeddings: vec![EmbeddedResource {
+                id: "a".to_owned(),
+                title: "alpha".to_owned(),
+                url: "/a".to_owned(),
+                embeddings: vec![1.0, 0.0, 0.0],
+            }],
+        },
+        engine::Metric::Euclidean,
+    )
+    .unwrap();
+    let shard2 = engine::index(
+        Resource {
+            embeddings: vec![EmbeddedResource {
+                id: "b".to_owned(),
+                title: "beta".to_owned(),
+                url: "/b".to_owned(),
+                embeddings: vec![0.0, 1.0, 0.0],
+            }],
+        },
+        engine::Metric::Cosine,
+    )
+    .unwrap();
+
+    let error =
+        engine::multi_shard_search(&[shard1, shard2], &[1.0, 0.0, 0.0], 1).unwrap_err();
+    assert!(error.to_string().contains("same metric"));
+}
+
+#[test]
+fn it_returns_empty_for_no_shards() {
+    let results = engine::multi_shard_search(&[], &[1.0, 0.0, 0.0], 5).unwrap();
+    assert!(results.is_empty());
+}

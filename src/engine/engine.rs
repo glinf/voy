@@ -165,6 +165,44 @@ pub fn search(index: &Index, query: &[f32], k: usize) -> anyhow::Result<Vec<Sear
         .collect())
 }
 
+pub fn multi_shard_search(
+    shards: &[Index],
+    query: &[f32],
+    k: usize,
+) -> anyhow::Result<Vec<SearchHit>> {
+    if shards.is_empty() || k == 0 {
+        return Ok(Vec::new());
+    }
+
+    let metric = shards[0].metric;
+    for shard in &shards[1..] {
+        ensure!(
+            shard.metric == metric,
+            "all shards must use the same metric"
+        );
+    }
+
+    let mut all_hits = Vec::new();
+    for shard in shards {
+        let hits = search(shard, query, k)?;
+        all_hits.extend(hits);
+    }
+
+    all_hits.sort_by(|a, b| match metric {
+        Metric::Euclidean => a
+            .score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        Metric::Cosine => b
+            .score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    });
+    all_hits.truncate(k);
+
+    Ok(all_hits)
+}
+
 pub fn add(index: &mut Index, resource: &Resource) -> anyhow::Result<()> {
     let dimension = resolve_dimension(index.dimension, resource)?;
     if dimension == 0 {

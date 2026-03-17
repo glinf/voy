@@ -12,47 +12,19 @@ pub fn multi_shard_search(
 ) -> Result<SearchResult, JsError> {
     set_panic_hook();
 
-    if shard_buffers.length() == 0 || k == 0 {
-        return Ok(SearchResult {
-            neighbors: vec![],
-        });
-    }
-
-    let mut all_hits = Vec::new();
-    let mut metric = None;
-
+    let mut shards = Vec::with_capacity(shard_buffers.length() as usize);
     for i in 0..shard_buffers.length() {
         let buffer = js_sys::Uint8Array::new(&shard_buffers.get(i)).to_vec();
         let index =
             engine::deserialize(&buffer).map_err(|error| JsError::new(&error.to_string()))?;
-
-        if let Some(m) = metric {
-            if m != index.metric {
-                return Err(JsError::new("all shards must use the same metric"));
-            }
-        }
-        metric = Some(index.metric);
-
-        let hits =
-            engine::search(&index, &query, k).map_err(|error| JsError::new(&error.to_string()))?;
-        all_hits.extend(hits);
+        shards.push(index);
     }
 
-    let metric = metric.unwrap();
-    all_hits.sort_by(|a, b| match metric {
-        engine::Metric::Euclidean => a
-            .score
-            .partial_cmp(&b.score)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        engine::Metric::Cosine => b
-            .score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal),
-    });
-    all_hits.truncate(k);
+    let hits = engine::multi_shard_search(&shards, &query, k)
+        .map_err(|error| JsError::new(&error.to_string()))?;
 
     Ok(SearchResult {
-        neighbors: all_hits
+        neighbors: hits
             .into_iter()
             .map(|hit| Neighbor {
                 id: hit.document.id,
