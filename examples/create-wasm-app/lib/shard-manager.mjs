@@ -87,10 +87,12 @@ function sequenceId(prefix) {
 export class VoyShardManager {
   static async open({
     Voy,
+    multiShardSearch,
     store,
     metric = "cosine",
     maxDocsPerShard = 1000,
     maxShardsPerSearch = 3,
+    similarityThreshold = 0.5,
     oversample = 5,
     cacheByteBudget = 32_000_000,
     model = null,
@@ -112,10 +114,12 @@ export class VoyShardManager {
 
     const manager = new VoyShardManager({
       Voy,
+      multiShardSearch,
       store,
       manifest,
       docIndex,
       maxShardsPerSearch,
+      similarityThreshold,
       oversample,
       cacheByteBudget,
       rerank,
@@ -128,19 +132,23 @@ export class VoyShardManager {
 
   constructor({
     Voy,
+    multiShardSearch,
     store,
     manifest,
     docIndex,
     maxShardsPerSearch,
+    similarityThreshold,
     oversample,
     cacheByteBudget,
     rerank,
   }) {
     this.Voy = Voy;
+    this.multiShardSearch = multiShardSearch;
     this.store = store;
     this.manifest = manifest;
     this.docIndex = docIndex;
     this.maxShardsPerSearch = maxShardsPerSearch;
+    this.similarityThreshold = similarityThreshold;
     this.oversample = oversample;
     this.cacheByteBudget = cacheByteBudget;
     this.rerank = rerank;
@@ -272,32 +280,50 @@ export class VoyShardManager {
       .slice(0, Math.min(maxShards, this.manifest.shards.length));
 
     const candidateBudget = Math.max(k * this.oversample, k);
-    const rankedResults = [];
 
     const loadedShards = await Promise.all(
       routedShards.map((shard) => this.loadShard(shard.shardId)),
     );
 
-    for (let i = 0; i < routedShards.length; i++) {
-      const shard = routedShards[i];
-      const loadedShard = loadedShards[i];
+    const loadedByShardId = new Map(
+      loadedShards.map((shard) => [shard.shardId, shard]),
+    );
+
+    for (const shard of routedShards) {
       this.shardAccessCounts.set(
         shard.shardId,
         (this.shardAccessCounts.get(shard.shardId) ?? 0) + 1,
       );
-      const vectorResults = loadedShard.voy.search(queryEmbedding, candidateBudget).neighbors;
+    }
+
+    const shardBuffers = loadedShards.map((shard) => shard.bytes);
+    const vectorResults = this.multiShardSearch(
+      shardBuffers,
+      queryEmbedding,
+      candidateBudget,
+    ).neighbors;
+
+    const resultsByShard = new Map();
+    for (const vectorResult of vectorResults) {
+      const shardId = this.docIndex.get(vectorResult.id);
+      if (!shardId || !loadedByShardId.has(shardId)) continue;
+      if (!resultsByShard.has(shardId)) resultsByShard.set(shardId, []);
+      resultsByShard.get(shardId).push(vectorResult);
+    }
+
+    const rankedResults = [];
+    for (const [shardId, results] of resultsByShard) {
+      const loadedShard = loadedByShardId.get(shardId);
       const lexicalScores = scoreCandidates(
         loadedShard.lexical,
         queryText,
-        vectorResults.map((result) => result.id),
+        results.map((r) => r.id),
         this.rerank,
       );
 
-      for (const vectorResult of vectorResults) {
+      for (const vectorResult of results) {
         const document = loadedShard.documentsById.get(vectorResult.id);
-        if (!document) {
-          continue;
-        }
+        if (!document) continue;
 
         const lexical = lexicalScores.get(vectorResult.id) ?? {
           lexicalScore: 0,
@@ -313,7 +339,7 @@ export class VoyShardManager {
           title: document.title,
           url: document.url,
           text: document.text,
-          shardId: shard.shardId,
+          shardId,
           vectorScore,
           lexicalScore: lexical.lexicalScore,
           finalScore,
@@ -424,39 +450,45 @@ export class VoyShardManager {
     return `shard-${value}`;
   }
 
+  routeToShard(embedding) {
+    let bestId = null;
+    let bestScore = -Infinity;
+
+    for (const shard of this.manifest.shards) {
+      if (shard.sealed || shard.docCount >= this.manifest.maxDocsPerShard) continue;
+      if (shard.docCount === 0 || !shard.centroid) continue;
+
+      const score = cosineSimilarity(embedding, shard.centroid);
+      if (score > bestScore) {
+        bestScore = score;
+        bestId = shard.shardId;
+      }
+    }
+
+    if (bestId !== null && bestScore >= this.similarityThreshold) {
+      return bestId;
+    }
+
+    return null;
+  }
+
   async applyAdd(document) {
     if (this.docIndex.has(document.id)) {
       await this.applyRemove(document.id);
     }
 
-    let shardId = this.manifest.activeShardId;
-    if (shardId) {
-      const currentShard = await this.loadShard(shardId);
-      if (currentShard.lexical.documents.length >= this.manifest.maxDocsPerShard) {
-        await this.markShardSealed(shardId, true);
-        this.manifest.activeShardId = null;
-        shardId = null;
-      }
-    }
-
+    let shardId = this.routeToShard(document.embedding);
     if (!shardId) {
       shardId = this.createShardId();
-      this.manifest.activeShardId = shardId;
     }
 
     const shard = await this.loadShard(shardId, true);
     shard.lexical.documents = shard.lexical.documents.filter((item) => item.id !== document.id);
     shard.lexical.documents.push(document);
-    await this.writeShard(
-      shardId,
-      shard.lexical.documents,
-      shard.lexical.documents.length >= this.manifest.maxDocsPerShard,
-    );
-    this.docIndex.set(document.id, shardId);
 
-    if (this.findShard(shardId)?.sealed) {
-      this.manifest.activeShardId = null;
-    }
+    const isFull = shard.lexical.documents.length >= this.manifest.maxDocsPerShard;
+    await this.writeShard(shardId, shard.lexical.documents, isFull);
+    this.docIndex.set(document.id, shardId);
   }
 
   async applyRemove(id) {
@@ -470,9 +502,6 @@ export class VoyShardManager {
     this.docIndex.delete(id);
 
     if (remaining.length === 0) {
-      if (this.manifest.activeShardId === shardId) {
-        this.manifest.activeShardId = null;
-      }
       await this.deleteShard(shardId);
       return;
     }
@@ -512,10 +541,9 @@ export class VoyShardManager {
       this.store.loadShardBytes(shardId),
       this.store.loadLexicalShard(shardId),
     ]);
-    const voy = this.Voy.deserialize(bytes);
     const bundle = {
       shardId,
-      voy,
+      bytes,
       lexical,
       documentsById: new Map(lexical.documents.map((document) => [document.id, document])),
       approximateBytes: bytes.byteLength + JSON.stringify(lexical).length,
@@ -531,7 +559,7 @@ export class VoyShardManager {
     const bytes = voy.serialize();
     return {
       shardId,
-      voy,
+      bytes,
       lexical,
       documentsById: new Map(lexical.documents.map((document) => [document.id, document])),
       approximateBytes: bytes.byteLength + JSON.stringify(lexical).length,
@@ -588,7 +616,7 @@ export class VoyShardManager {
       this.manifest.shards[existingIndex] = summary;
     }
 
-    await this.store.saveShardBytes(shardId, bundle.voy.serialize());
+    await this.store.saveShardBytes(shardId, bundle.bytes);
     await this.store.saveLexicalShard(shardId, bundle.lexical);
     this.dropCachedShard(shardId);
     this.rememberShard(shardId, bundle);

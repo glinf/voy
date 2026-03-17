@@ -175,10 +175,11 @@ function wireWorker() {
 async function loadManager() {
   const voyModule = await import("voy-search");
   await voyModule.default();
-  const { Voy } = voyModule;
+  const { Voy, multi_shard_search } = voyModule;
 
   manager = await VoyShardManager.open({
     Voy,
+    multiShardSearch: multi_shard_search,
     store: new OpfsVoyStore("voy-demo"),
     metric: "cosine",
     maxDocsPerShard: 2,
