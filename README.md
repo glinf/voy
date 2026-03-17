@@ -5,18 +5,10 @@
 
 ![voy: a vector similarity search engine in WebAssembly][demo]
 
-[![npm version](https://badge.fury.io/js/voy-search.svg)](https://badge.fury.io/js/voy-search)
-
 - **Exact search**: dense vector search tuned for browser workloads.
 - **Binary indexes**: compact serialized indexes via `Uint8Array`.
 - **Runtime dimensions**: optimized for `384` dimensions and below, while still supporting larger vectors.
 - **Worker-friendly**: designed to pair with local embedding generation in a Web Worker.
-
-## Installation
-
-```bash
-npm install voy-search
-```
 
 ## API
 
